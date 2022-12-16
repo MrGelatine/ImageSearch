@@ -9,6 +9,8 @@ import streamlit as st
 import PIL
 import faiss
 from PIL import Image
+import clip
+import torch
 
 def getDescriptors(img):
     img = np.array(img)[:, :, ::-1].copy()
@@ -35,7 +37,7 @@ def generateDescriptorClassifier(dataPath, savePath, clusters_n=1000, iterations
     print("Init is ok!")
     print(data.shape)
     kmeans.fit(data)
-    print("Donw!")
+    print("Done!")
     with open(savePath, 'wb') as handle:
         pickle.dump(kmeans,handle)
 def getImageEmbedding(img, classifier_path, categories=512):
@@ -50,15 +52,21 @@ def getImageEmbedding(img, classifier_path, categories=512):
         return result.astype('float32')
     else:
         return -1
-def fillDataCSV(csv_path, data_path, classifier_path, categories=512, max_exmpl=5000):
+def fillDataCSV(csv_path, data_path, classifier_path, categories=512, max_exmpl=5000, model= None):
     files = []
     embeddings = []
     true_embeddings = []
     c = 1
     for (dirpath, dirnames, filenames) in walk(data_path):
         for img_path in filenames:
-            img = cv.imread(f"{dirpath}\{img_path}")
-            embed = getImageEmbedding(img, classifier_path,categories)
+            if model is None:
+                img = cv.imread(f"{dirpath}\{img_path}")
+                embed = getImageEmbedding(img, classifier_path,categories)
+            else:
+                img = preprocess(Image.open(f"{dirpath}\{img_path}")).unsqueeze(0)
+                embed = model.encode_image(img)
+                del img
+                torch.cuda.empty_cache()
             if not isinstance(embed, int):
                 files.append(f"{dirpath}/{img_path}")
                 embeddings.append(' '.join(str(x) for x in embed.tolist()))
@@ -103,16 +111,21 @@ def matchImage(img, csv_path, classifier_path, categories=512):
     #cv.waitKey(0)
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, preprocess = clip.load("ViT-B/32", device=device)
+    model.eval()
     #generateDescriptorClassifier("VOC/data",'voc_desc_clsrt2048.pickle',1024,200)
     #fillDataCSV("VOC/voc_512.csv", "VOC/data", "classifier/desc_clsrt512.pickle",512,5000)
-    fillDataCSV("VOC/voc_1024_raw.csv", "VOC/data", "classifier/desc_clsrt1024.pickle", 1024, 20000)
+    fillDataCSV("VOC/clip_voc_1000.csv", "VOC/data", "classifier/desc_clsrt1024.pickle", 1024, 1000, model)
     #fillDataCSV("VOC/voc_2048.csv", "VOC/data", "classifier/desc_clsrt2048.pickle", 2048)
     #img = cv.imread("COCO/000000000650.jpg")
     #matchImage(img, "data/imagenet5000_1024.csv", "classifier/desc_clsrt1024.pickle",1024)
     #img = cv.imread("VOC/data/2007_002470.jpg")
     #
+    '''
     uploaded_file = st.file_uploader("Choose an image...", type=["png", "jpg", "jpeg", "webp", "tiff"])
     if uploaded_file is not None:
         image = PIL.Image.open(uploaded_file).convert("RGB")
         image = PIL.ImageOps.exif_transpose(image)
-        matchImage(image, "VOC/voc_1024_raw.csv", "classifier/desc_clsrt1024.pickle", 1024)
+        matchImage(image, "VOC/voc_1024_norm.csv", "classifier/desc_clsrt1024.pickle", 1024)
+    '''
