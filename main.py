@@ -7,11 +7,26 @@ import pandas as pd
 from sklearn.neighbors import NearestNeighbors
 import streamlit as st
 import PIL
+import torch
+import clip
 import faiss
 from PIL import Image
-import clip
-import torch
+from GPUtil import showUtilization as gpu_usage
+from numba import cuda
 
+
+def free_gpu_cache():
+    print("Initial GPU Usage")
+    gpu_usage()
+
+    torch.cuda.empty_cache()
+
+    cuda.select_device(0)
+    cuda.close()
+    cuda.select_device(0)
+
+    print("GPU Usage after emptying the cache")
+    gpu_usage()
 def getDescriptors(img):
     img = np.array(img)[:, :, ::-1].copy()
     gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
@@ -60,17 +75,24 @@ def fillDataCSV(csv_path, data_path, classifier_path, categories=512, max_exmpl=
     for (dirpath, dirnames, filenames) in walk(data_path):
         for img_path in filenames:
             if model is None:
+
                 img = cv.imread(f"{dirpath}\{img_path}")
                 embed = getImageEmbedding(img, classifier_path,categories)
             else:
-                img = preprocess(Image.open(f"{dirpath}\{img_path}")).unsqueeze(0)
-                embed = model.encode_image(img)
-                del img
-                torch.cuda.empty_cache()
+                with torch.no_grad():
+                    img = preprocess(Image.open(f"{dirpath}\{img_path}")).unsqueeze(0).cuda()
+                    embed = model.encode_image(img).cpu().squeeze()
             if not isinstance(embed, int):
                 files.append(f"{dirpath}/{img_path}")
                 embeddings.append(' '.join(str(x) for x in embed.tolist()))
-                true_embeddings.append(embed)
+                true_embeddings.append(np.asarray(embed).astype('float32'))
+                del embed
+                del img
+                torch.cuda.empty_cache()
+                #print("After:")
+                #print(torch.cuda.memory_allocated(), torch.cuda.memory_reserved())
+                #print()
+
             print(f"{c}/{len(filenames)}")
             c += 1
             if(max_exmpl == c):
@@ -84,10 +106,15 @@ def fillDataCSV(csv_path, data_path, classifier_path, categories=512, max_exmpl=
     d = {'file_path': files, 'embeddings': embeddings}
     df = pd.DataFrame(data=d)
     df.to_csv(csv_path)
-def matchImage(img, csv_path, classifier_path, categories=512):
+def matchImage(img, csv_path, classifier_path, categories=512, model = None):
     data = pd.read_csv(csv_path)
-    embed = getImageEmbedding(img, classifier_path, categories).reshape(1, -1)
+    if (model is None):
+        embed = getImageEmbedding(img, classifier_path, categories).reshape(1, -1)
+    else:
+        tens_img = preprocess(img).unsqueeze(0).cuda()
+        embed = model.encode_image(tens_img).cpu().squeeze()
     index = faiss.read_index(f"{csv_path[:-4]}.index")
+    embed = np.asarray(embed.unsqueeze(0),dtype="float32")
     D, I = index.search(embed, 5)
     I = np.squeeze(I,axis= 0)
     D = np.squeeze(D, axis=0)
@@ -102,30 +129,20 @@ def matchImage(img, csv_path, classifier_path, categories=512):
     st.image(Image.open(img_path_2), caption=f"Almost same {D[2]}")
     st.image(Image.open(img_path_3), caption=f"Little same {D[3]}")
     st.image(Image.open(img_path_4), caption=f"No same {D[4]}")
-    #cv.imshow("original", img)
-    #cv.imshow("absolute_same", cv.imread(img_path_0))
-    #cv.imshow("same", cv.imread(img_path_1))
-    #cv.imshow("almost same", cv.imread(img_path_2))
-    #cv.imshow("little same", cv.imread(img_path_3))
-    #cv.imshow("no same", cv.imread(img_path_4))
-    #cv.waitKey(0)
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model, preprocess = clip.load("ViT-B/32", device=device)
     model.eval()
     #generateDescriptorClassifier("VOC/data",'voc_desc_clsrt2048.pickle',1024,200)
-    #fillDataCSV("VOC/voc_512.csv", "VOC/data", "classifier/desc_clsrt512.pickle",512,5000)
-    fillDataCSV("VOC/clip_voc_1000.csv", "VOC/data", "classifier/desc_clsrt1024.pickle", 1024, 1000, model)
+    fillDataCSV("VOC/voc_512_nn.csv", "VOC/data", "classifier/desc_clsrt512.pickle",512,10000, model)
+    #fillDataCSV("VOC/clip_voc_1000.csv", "VOC/data", "classifier/desc_clsrt1024.pickle", 1024, 1000, model)
     #fillDataCSV("VOC/voc_2048.csv", "VOC/data", "classifier/desc_clsrt2048.pickle", 2048)
-    #img = cv.imread("COCO/000000000650.jpg")
-    #matchImage(img, "data/imagenet5000_1024.csv", "classifier/desc_clsrt1024.pickle",1024)
+    #img = Image.open("COCO/data/000000000650.jpg")#cv.imread("COCO/000000000650.jpg")
+    #matchImage(img, "VOC/voc_512_nn.csv", "classifier/desc_clsrt1024.pickle",512, model)
     #img = cv.imread("VOC/data/2007_002470.jpg")
-    #
-    '''
     uploaded_file = st.file_uploader("Choose an image...", type=["png", "jpg", "jpeg", "webp", "tiff"])
     if uploaded_file is not None:
         image = PIL.Image.open(uploaded_file).convert("RGB")
         image = PIL.ImageOps.exif_transpose(image)
-        matchImage(image, "VOC/voc_1024_norm.csv", "classifier/desc_clsrt1024.pickle", 1024)
-    '''
+        matchImage(image, "VOC/voc_512_nn.csv", "classifier/desc_clsrt512.pickle", 512, model)
